@@ -5,6 +5,8 @@ import types
 import builtins
 
 # --- configuration -------------------------------------
+print("Trace your Python code!")
+print("WARNING: This will run the code file you provide so ensure you trust it before entering")
 USER_FILE = input('Enter the name of the file to trace (e.g code.py): ')
 
 # --- helpers -------------------------------------------
