@@ -1,4 +1,4 @@
-graph_exc = {
+graphx = {
     "A": ["B", "C"],
     "B": ["A", "D"],
     "C": ["A", "D", "E"],
@@ -6,14 +6,14 @@ graph_exc = {
     "E": ["C", "D"],
 }
 
-explored = {v: False for v in graph_exc}
+explored = {vx: False for vx in graphx}
 order = []
 
 
 def dfs_recurse(v):
   explored[v] = True
   order.append(v)                   # EXPLORE v
-  for n in sorted(graph_exc[v]):    # ascending order
+  for n in sorted(graphx[v]):    # ascending order
     if not explored[n]:
       dfs_recurse(n)
 
