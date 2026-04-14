@@ -7,7 +7,8 @@ import builtins
 # --- configuration -------------------------------------
 print("Trace your Python code!")
 print("WARNING: This will run the code file you provide so ensure you trust it before entering")
-USER_FILE = input('Enter the name of the file to trace (e.g code.py): ')
+user_file = input('Enter the name of the file to trace (e.g code.py): ')
+EXCLUDE_SUFFIX = "x"
 
 # --- helpers -------------------------------------------
 
@@ -16,7 +17,7 @@ def get_depth(frame):
   depth = 0
   f = frame
   while f:
-    if f.f_code.co_filename.endswith(USER_FILE):
+    if f.f_code.co_filename.endswith(user_file):
       depth += 1
     f = f.f_back
   return depth
@@ -27,6 +28,7 @@ def get_depth(frame):
 
 
 def collect_changes():
+  global user_file
   changes_local = []
 
   _prev_locals: dict[int, dict] = {}
@@ -41,16 +43,13 @@ def collect_changes():
     if last_logged.get('OUT') != text:
       changes_local.append(('OUT', text))
       last_logged['OUT'] = text
-    return real_print(*args, sep=sep, end=end, **kw)
-
-  builtins.print = log_print
 
   # tracer ------------------------------------------------
   def _trace(frame, event, arg):
     co = frame.f_code
     src = co.co_filename
     # skip non‑user frames and internal comprehensions
-    if not src.endswith(USER_FILE):
+    if not src.endswith(user_file):
       return _trace
     if co.co_name != '<module>' and co.co_name.startswith('<'):
       return _trace
@@ -69,16 +68,16 @@ def collect_changes():
     if event == 'return' and co.co_name != '<module>':
       parent = frame.f_back
       depth_after = get_depth(
-          parent) if parent and parent.f_code.co_filename.endswith(USER_FILE) else 0
+          parent) if parent and parent.f_code.co_filename.endswith(user_file) else 0
       if last_logged.get('CS_DEPTH') != depth_after:
         changes_local.append(('CS_DEPTH', depth_after))
         last_logged['CS_DEPTH'] = depth_after
       # restore caller locals (snapshot)
-      if parent and parent.f_code.co_filename.endswith(USER_FILE):
+      if parent and parent.f_code.co_filename.endswith(user_file):
         for var, val in parent.f_locals.items():
           if var.startswith('__') and var.endswith('__'):
             continue
-          if var.endswith('_exc') or isinstance(
+          if var.endswith('x') or isinstance(
                   val, types.FunctionType):
             continue
           if last_logged.get(var) != val:
@@ -97,7 +96,8 @@ def collect_changes():
       for var, val in locs.items():
         if var.startswith('__') and var.endswith('__'):
           continue
-        if var.endswith('_exc') or isinstance(val, types.FunctionType):
+        if var.endswith(EXCLUDE_SUFFIX) or isinstance(
+                val, types.FunctionType):
           continue
         if var not in prev or prev[var] != val:
           if last_logged.get(var) != val:
@@ -110,7 +110,7 @@ def collect_changes():
       for gvar, gval in g.items():
         if gvar.startswith('__') and gvar.endswith('__'):
           continue
-        if gvar.endswith('_exc') or isinstance(
+        if gvar.endswith(EXCLUDE_SUFFIX) or isinstance(
                 gval, types.FunctionType):
           continue
         if gvar not in _prev_globals or _prev_globals[gvar] != gval:
@@ -122,11 +122,23 @@ def collect_changes():
 
     return _trace
 
-  # run user code with tracer --------------------------------
-  sys.settrace(_trace)
-  namespace = {}
-  with open(USER_FILE) as f:
-    exec(compile(f.read(), USER_FILE, 'exec'), namespace)
+  while True:
+    try:
+      with open(user_file) as f:
+        # run user code with tracer --------------------------------
+        builtins.print = log_print
+        sys.settrace(_trace)
+        namespace = {}
+        exec(compile(f.read(), user_file, 'exec'), namespace)
+        break
+    except SystemExit:
+      break
+    except Exception as e:
+      print(f"Error opening file for execution: {e}")
+      user_file = input(
+          'Enter the name of the file to trace (e.g code.py): ')
+      continue
+
   sys.settrace(None)
   builtins.print = real_print
   return changes_local
@@ -152,19 +164,97 @@ def build_columns(changes):
   return ordered
 
 # -------------------------------------------------------
-# Interactive replay
+# Optional user‑defined ordering of variable columns
 # -------------------------------------------------------
 
 
+def reorder_columns(columns):
+  """
+  Let the user specify an ordering for the *variable* columns.
+  CS_DEPTH (if present) stays on the far left, RET & OUT stay on the far right.
+  """
+  var_cols = [c for c in columns if c not in ('CS_DEPTH', 'RET', 'OUT')]
+  if not var_cols:
+    return columns   # nothing to reorder
+
+  ans = input(
+      "Re‑order variable columns before tracing? (y/N): ").strip().lower()
+  if ans != 'y':
+    return columns
+
+  # show numbered list
+  print("\nVariable columns:")
+  for i, v in enumerate(var_cols, 1):
+    print(f"{i}) {v}")
+
+  prompt = ("enter a comma‑separated string for variables to appear first "
+            "(others will follow), e.g. 2,5,1: ")
+  raw = input(prompt)
+
+  try:
+    numbers = [int(x.strip()) for x in raw.split(',') if x.strip()]
+    if (not numbers or
+        any(n < 1 or n > len(var_cols) for n in numbers) or
+            len(set(numbers)) != len(numbers)):
+      raise ValueError
+
+    first_part = [var_cols[n - 1] for n in numbers]
+    remainder = [v for v in var_cols if v not in first_part]
+
+    new_cols = []
+    if 'CS_DEPTH' in columns:
+      new_cols.append('CS_DEPTH')
+    new_cols.extend(first_part + remainder)
+    if 'RET' in columns:
+      new_cols.append('RET')
+    if 'OUT' in columns:
+      new_cols.append('OUT')
+    return new_cols
+
+  except ValueError:
+    print("invalid entry, using default ordering...")
+    return columns
+
+
+# -------------------------------------------------------
+# Interactive replay
+# -------------------------------------------------------
 all_changes = collect_changes()
 columns = build_columns(all_changes)
+columns = reorder_columns(columns)
 row = {c: '' for c in columns}
 rows = []
 
+# -------------------------------------------------------
+# Replace True/False with T/F for printing (recursively)
+# -------------------------------------------------------
+
+
+def fmt_bool(obj):
+  """Return a string where every boolean True/False becomes T/F."""
+  if isinstance(obj, bool):
+    return 'T' if obj else 'F'
+  if isinstance(obj, dict):
+    pairs = (f"{fmt_bool(k)}: {fmt_bool(v)}" for k, v in obj.items())
+    return '{' + ', '.join(pairs) + '}'
+  if isinstance(obj, (list, tuple, set)):
+    inner = ', '.join(fmt_bool(x) for x in obj)
+    open_br, close_br = (
+        '[', ']') if isinstance(
+        obj, list) else (
+        '(', ')') if isinstance(
+        obj, tuple) else (
+        '{', '}')
+    # preserve trailing comma for 1‑tuples if you like, but not essential
+    return f"{open_br}{inner}{close_br}"
+  return str(obj)
+
 
 def display(rows):
-  widths = {c: max(len(str(r.get(c, ''))) for r in rows +
-                   [row for row in rows[-1:]] + [{c: c}]) + 2 for c in columns}
+  # width calculation
+  widths = {c: max(len(fmt_bool(r.get(c, ''))) for r in rows + [{c: c}]) + 2
+            for c in columns}
+
   sep = '+' + '+'.join('-' * widths[c] for c in columns) + '+'
   header = '|' + ''.join(f' {c}'.ljust(widths[c]) + '|' for c in columns)
   print(sep)
@@ -174,9 +264,11 @@ def display(rows):
     print(
         '|' +
         ''.join(
-            f' {str(r.get(c, ""))}'.ljust(
+            f' {fmt_bool(r.get(c, ""))}'.ljust(
                 widths[c]) +
-            '|' for c in columns))
+            '|' for c in columns)
+    )
+
   print(sep)
 
 
